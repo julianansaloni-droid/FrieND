@@ -4800,8 +4800,11 @@ function checkinNotifStatusLabel() {
     const t = state.user.checkin_time || '21:00';
     return 'On — a gentle nudge around ' + t;
   }
+  if (window._isIOS) {
+    return 'Off · iPhone can\'t self-schedule — tap for a Shortcuts workaround';
+  }
   if (!supportsScheduledNotifs()) {
-    return 'Off · may not be supported on this browser';
+    return 'Off · needs a Chrome flag or a phone alarm — tap to see how';
   }
   return 'Off · one quiet reminder at your check-in time';
 }
@@ -4876,16 +4879,127 @@ async function cancelCheckinNotifications() {
   } catch (e) { /* ignore */ }
 }
 
-/* Fire a one-off test notification ~10s out so the user can confirm it works. */
+/* iPhone can't self-schedule notifications (WebKit has no local scheduling API,
+   and web push would need a server). Instead of failing, point the user to the
+   iOS-native workaround that actually works: a Shortcuts time automation. */
+function showIosReminderHelp() {
+  const t = (state.user && state.user.checkin_time) || '21:00';
+  const m = document.createElement('div');
+  m.className = 'modal-backdrop show';
+  m.style.zIndex = '190';
+  m.innerHTML = `
+    <div class="modal" style="max-width:460px;">
+      <button class="modal-close" data-close>×</button>
+      <h2>A reminder on iPhone.</h2>
+      <p class="sub" style="margin-bottom:14px;">iPhone doesn't let a web app schedule its own notifications — Apple only allows it through a server, which FrieND deliberately doesn't use. But iOS can do the nudge for you, and it's quick to set up.</p>
+      <div style="background:var(--paper-warm);border:1px solid var(--rule-soft);border-radius:12px;padding:14px 16px;line-height:1.6;font-size:14px;">
+        <div style="font-weight:600;margin-bottom:8px;">The reliable way — a Shortcuts automation:</div>
+        <ol style="margin:0;padding-left:20px;display:flex;flex-direction:column;gap:6px;">
+          <li>Open the <strong>Shortcuts</strong> app → <strong>Automation</strong> tab</li>
+          <li>Tap <strong>＋</strong> → <strong>Create Personal Automation</strong></li>
+          <li>Choose <strong>Time of Day</strong> → set <strong>${escapeHtml(t)}</strong> → <strong>Daily</strong></li>
+          <li>Add action <strong>Open App</strong> → pick <strong>FrieND</strong><br><span style="color:var(--ink-faint);font-style:italic;">(or Open URL with your app link if it's not listed)</span></li>
+          <li>Turn <strong>Run Immediately</strong> on, <strong>Ask Before Running</strong> off</li>
+        </ol>
+      </div>
+      <p class="sub" style="margin-top:14px;margin-bottom:0;font-style:italic;">Simpler still: a recurring Clock alarm or a daily Reminder labelled "FrieND check-in" works with zero setup. And on an Android phone, the built-in reminder here works directly.</p>
+      <div style="margin-top:18px;display:flex;justify-content:flex-end;">
+        <button class="pill solid" data-close>Got it</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(m);
+  m.querySelectorAll('[data-close]').forEach(b => b.onclick = () => m.remove());
+  m.addEventListener('click', (e) => { if (e.target === m) m.remove(); });
+  logEvent('checkin_notif_ios_help', {});
+}
+
+/* On Android, the scheduling API (Notification Triggers) is experimental and
+   off by default in stable Chrome — so this is the honest fallback rather than
+   pretending the browser is at fault. Offers the always-works native route and
+   the optional Chrome-flag route. */
+function showAndroidReminderHelp() {
+  const t = (state.user && state.user.checkin_time) || '21:00';
+  const m = document.createElement('div');
+  m.className = 'modal-backdrop show';
+  m.style.zIndex = '190';
+  m.innerHTML = `
+    <div class="modal" style="max-width:470px;">
+      <button class="modal-close" data-close>×</button>
+      <h2>A reminder on Android.</h2>
+      <p class="sub" style="margin-bottom:14px;">The web feature that fires a notification while the app is closed (Notification Triggers) is still experimental and switched off by default in Chrome — that's why this couldn't turn on. Two ways forward:</p>
+
+      <div style="background:var(--paper-warm);border:1px solid var(--rule-soft);border-radius:12px;padding:14px 16px;line-height:1.6;font-size:14px;margin-bottom:12px;">
+        <div style="font-weight:600;margin-bottom:8px;">Always works — a phone alarm or calendar event:</div>
+        <ul style="margin:0;padding-left:20px;display:flex;flex-direction:column;gap:6px;">
+          <li><strong>Clock app → Alarm</strong>, set <strong>${escapeHtml(t)}</strong>, repeat daily, label "FrieND check-in"</li>
+          <li>or <strong>Google Calendar</strong>: a daily event at ${escapeHtml(t)} with a notification (tappable)</li>
+        </ul>
+        <div style="color:var(--ink-faint);font-style:italic;margin-top:8px;">Reliable, nothing leaves your phone, no setup risk.</div>
+      </div>
+
+      <div style="background:var(--paper-warm);border:1px solid var(--rule-soft);border-radius:12px;padding:14px 16px;line-height:1.6;font-size:14px;">
+        <div style="font-weight:600;margin-bottom:8px;">Integrated — enable one Chrome flag:</div>
+        <ol style="margin:0;padding-left:20px;display:flex;flex-direction:column;gap:6px;">
+          <li>In Chrome, open <strong>chrome://flags</strong></li>
+          <li>Search <strong>Experimental Web Platform features</strong> → <strong>Enabled</strong></li>
+          <li>Relaunch Chrome, reopen FrieND, turn this on, tap <strong>Test</strong></li>
+        </ol>
+        <div style="color:var(--ink-faint);font-style:italic;margin-top:8px;">Experimental: affects all sites and a future Chrome update could switch it off. Fine for personal use.</div>
+      </div>
+
+      <div style="margin-top:18px;display:flex;justify-content:flex-end;">
+        <button class="pill solid" data-close>Got it</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(m);
+  m.querySelectorAll('[data-close]').forEach(b => b.onclick = () => m.remove());
+  m.addEventListener('click', (e) => { if (e.target === m) m.remove(); });
+  logEvent('checkin_notif_android_help', {});
+}
+
+/* Diagnostic test. Two stages so we can tell *where* it fails:
+   (1) fire an immediate notification — proves permission + service worker +
+       OS-level notifications all work; (2) schedule a triggered one ~10s out —
+       proves the scheduling API actually fires. Errors are surfaced, not hidden. */
 async function testCheckinNotification() {
-  if (!supportsScheduledNotifs()) { showToast('Scheduled notifications not supported here.'); return; }
-  if (Notification.permission !== 'granted') {
-    const p = await Notification.requestPermission().catch(() => 'denied');
-    if (p !== 'granted') { showToast('Notification permission is off.'); return; }
+  if (!supportsScheduledNotifs()) {
+    if (window._isIOS) { showIosReminderHelp(); } else { showAndroidReminderHelp(); }
+    return;
   }
+  // Permission
+  let perm = Notification.permission;
+  if (perm !== 'granted') {
+    perm = await Notification.requestPermission().catch(() => 'denied');
+  }
+  if (perm !== 'granted') {
+    showToast('Notifications are blocked. Turn them on for this site in Chrome → site settings, and for Chrome in Android settings.', 5200);
+    return;
+  }
+  // Active service worker (ready waits until it's actually controlling)
+  let reg;
+  try { reg = await navigator.serviceWorker.ready; }
+  catch (e) { showToast('Service worker not ready — reload the app and retry.', 4200); return; }
+  if (!reg || !reg.active) { showToast('No active service worker yet — reload once and retry.', 4200); return; }
+
+  // Stage 1 — immediate notification (no trigger). If this doesn't appear,
+  // the problem is permission / OS notifications, not the scheduling API.
   try {
-    const reg = await navigator.serviceWorker.getRegistration();
-    if (!reg) { showToast('Service worker not ready — reload and retry.'); return; }
+    await reg.showNotification('FrieND — test', {
+      body: 'Notifications work. A timed one will follow in about 10 seconds.',
+      icon: 'icon-192.png',
+      badge: 'icon-192.png',
+      tag: 'friend-test-immediate',
+      data: { url: location.href.split('#')[0], kind: 'test' }
+    });
+  } catch (e) {
+    showToast('Immediate notification failed: ' + (e.message || 'unknown error') + '. Check Android notification settings for Chrome.', 5600);
+    return;
+  }
+
+  // Stage 2 — scheduled notification ~10s out via TimestampTrigger.
+  try {
     await reg.showNotification('FrieND', {
       tag: 'friend-checkin-test',
       body: notifText('checkin'),
@@ -4894,9 +5008,9 @@ async function testCheckinNotification() {
       showTrigger: new TimestampTrigger(Date.now() + 10000),
       data: { url: location.href.split('#')[0], kind: 'checkin-test' }
     });
-    showToast('Test set — arrives in ~10s. You can close the app to check.', 4200);
+    showToast('Did the test banner just appear? If yes, a second one lands in ~10s (you can close the app).', 5200);
   } catch (e) {
-    showToast('Could not schedule the test on this browser.');
+    showToast('The immediate one worked, but scheduling failed: ' + (e.message || 'error') + '. The timed feature may not work on this build — use a phone alarm instead.', 6000);
   }
 }
 const SCAFFOLD_TEMPLATES = {
@@ -8912,8 +9026,8 @@ async function settingsAction(action) {
     } else {
       // Turning on — request permission, then arm
       if (!supportsScheduledNotifs()) {
-        showToast('This browser can\'t schedule reminders. Try Chrome on Android.', 4200);
-        return;
+        if (window._isIOS) { showIosReminderHelp(); return; }
+        showAndroidReminderHelp(); return;
       }
       state.user.checkin_notif = true; // optimistic; revert if denied
       const res = await enableCheckinReminder();
