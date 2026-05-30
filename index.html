@@ -3777,6 +3777,67 @@
   /* Hide companion under reduced motion (it's a moving element) */
   body.motion-reduced .cp-frame,
   body.motion-reduced .cp-glow { animation: none !important; }
+  /* ============================== PWA INSTALL DIAGNOSTIC ============================== */
+  .pwa-diag {
+    margin-top: 14px;
+    padding: 14px;
+    background: var(--paper-warm);
+    border: 1px solid var(--rule-soft);
+    border-radius: 12px;
+  }
+  .pwa-diag-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    color: var(--ink-faint);
+    font-weight: 600;
+    margin-bottom: 10px;
+  }
+  .pwa-diag-recheck {
+    background: transparent;
+    border: 1px solid var(--rule);
+    border-radius: 99px;
+    color: var(--ink-soft);
+    font-size: 11px;
+    padding: 3px 10px;
+    cursor: pointer;
+    text-transform: none;
+    letter-spacing: 0;
+    font-family: 'DM Sans', system-ui, sans-serif;
+  }
+  .pwa-diag-recheck:active { background: var(--paper-lift); }
+  .pwa-diag-rows { display: flex; flex-direction: column; gap: 7px; }
+  .pwa-diag-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    font-size: 12.5px;
+    color: var(--ink);
+    line-height: 1.4;
+  }
+  .pwa-diag-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    margin-top: 4px;
+  }
+  .pwa-diag-dot.ok { background: var(--moss); }
+  .pwa-diag-dot.bad { background: var(--rose-deep); }
+  .pwa-diag-dot.pending { background: var(--amber); }
+  .pwa-diag-note {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--rule-soft);
+    font-size: 11.5px;
+    font-style: italic;
+    color: var(--ink-faint);
+    line-height: 1.45;
+    font-family: 'Fraunces', serif;
+  }
 </style>
 </head>
 <body>
@@ -4334,13 +4395,30 @@
 
   // Register the service worker — only over http(s); never on file://
   // (a service worker cannot run from a local file, and shouldn't).
+  window._swStatus = 'not-started';
   if ('serviceWorker' in navigator &&
       (location.protocol === 'https:' || location.protocol === 'http:')) {
     window.addEventListener('load', () => {
-      navigator.serviceWorker.register('sw.js').catch(() => {
-        /* Silent — the app still works fully without offline caching. */
+      window._swStatus = 'registering';
+      navigator.serviceWorker.register('sw.js').then((reg) => {
+        window._swStatus = 'registered';
+        // Track when it becomes active/controlling
+        if (navigator.serviceWorker.controller) window._swStatus = 'active';
+        if (reg.active) window._swStatus = 'active';
+        reg.addEventListener('updatefound', () => {
+          const sw = reg.installing;
+          if (sw) sw.addEventListener('statechange', () => {
+            if (sw.state === 'activated') window._swStatus = 'active';
+          });
+        });
+      }).catch((err) => {
+        window._swStatus = 'error: ' + (err && err.message ? err.message : 'failed');
       });
     });
+  } else if (location.protocol === 'file:') {
+    window._swStatus = 'file:// — install needs https or localhost';
+  } else {
+    window._swStatus = 'unsupported';
   }
 
   // Detect standalone mode (already installed)
@@ -8479,7 +8557,107 @@ function renderInstallBlock() {
         </div>
       </div>
     </div>
+    ${pwaDiagnosticHTML()}
   `;
+  wirePwaDiagnostic(block);
+}
+
+/* PWA diagnostic — a small, on-device readout of why "Install app" may not
+   be showing. Surfaces service-worker, manifest, and icon status without
+   needing a desktop or remote debugging. Tap "Re-check" to refresh. */
+function pwaDiagnosticHTML() {
+  // Only meaningful when hosted; on file:// it just explains the situation
+  const onFile = location.protocol === 'file:';
+  return `
+    <div class="pwa-diag" id="pwa-diag">
+      <div class="pwa-diag-head">
+        <span>Install diagnostics</span>
+        <button class="pwa-diag-recheck" data-pwa-recheck>Re-check</button>
+      </div>
+      <div class="pwa-diag-rows" id="pwa-diag-rows">
+        <div class="pwa-diag-row"><span class="pwa-diag-dot pending"></span> checking…</div>
+      </div>
+      ${onFile ? '<div class="pwa-diag-note">You\'re opening this as a local file. Install needs the app served over https (e.g. GitHub Pages) or localhost.</div>' : ''}
+    </div>
+  `;
+}
+
+function wirePwaDiagnostic(scope) {
+  const root = (scope || document).querySelector('#pwa-diag');
+  if (!root) return;
+  const rows = root.querySelector('#pwa-diag-rows');
+  const recheck = root.querySelector('[data-pwa-recheck]');
+
+  async function run() {
+    rows.innerHTML = '<div class="pwa-diag-row"><span class="pwa-diag-dot pending"></span> checking…</div>';
+    const checks = [];
+
+    // 1. Secure context
+    const secure = (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1');
+    checks.push({ ok: secure, label: secure ? 'Served securely (https/localhost)' : 'Not a secure context — install needs https or localhost' });
+
+    // 2. Manifest reachable
+    let manifestOk = false, manifestMsg = 'manifest.json not reachable';
+    try {
+      const r = await fetch('manifest.json', { cache: 'no-store' });
+      if (r.ok) {
+        const j = await r.json();
+        const has192 = (j.icons || []).some(i => (i.sizes || '').includes('192'));
+        const has512 = (j.icons || []).some(i => (i.sizes || '').includes('512'));
+        manifestOk = !!(j.name || j.short_name) && has192 && has512 && !!j.start_url;
+        manifestMsg = manifestOk ? 'manifest.json valid (name, start_url, 192 + 512 icons)' :
+          'manifest.json loaded but missing fields (need name, start_url, 192 + 512 icons)';
+      } else {
+        manifestMsg = 'manifest.json returned ' + r.status;
+      }
+    } catch (e) { manifestMsg = 'manifest.json fetch failed (' + (e.message || 'error') + ')'; }
+    checks.push({ ok: manifestOk, label: manifestMsg });
+
+    // 3. Icons reachable
+    let iconsOk = false, iconMsg = 'icons not reachable';
+    try {
+      const a = await fetch('icon-192.png', { cache: 'no-store' });
+      const b = await fetch('icon-512.png', { cache: 'no-store' });
+      iconsOk = a.ok && b.ok;
+      iconMsg = iconsOk ? 'icon-192.png + icon-512.png load' :
+        ('icon files: 192=' + a.status + ', 512=' + b.status);
+    } catch (e) { iconMsg = 'icon fetch failed (' + (e.message || 'error') + ')'; }
+    checks.push({ ok: iconsOk, label: iconMsg });
+
+    // 4. Service worker
+    let swOk = false, swMsg = 'service worker: ' + (window._swStatus || 'unknown');
+    try {
+      if ('serviceWorker' in navigator) {
+        const reg = await navigator.serviceWorker.getRegistration();
+        if (reg && (reg.active || reg.installing || reg.waiting)) {
+          swOk = !!reg.active;
+          swMsg = reg.active ? 'service worker active (offline ready)' :
+            'service worker registering — reload in a few seconds';
+        } else {
+          swMsg = 'service worker not registered — ' + (window._swStatus || 'check sw.js uploaded');
+        }
+      } else {
+        swMsg = 'service workers unsupported in this browser';
+      }
+    } catch (e) { swMsg = 'service worker error: ' + (e.message || 'error'); }
+    checks.push({ ok: swOk, label: swMsg });
+
+    // 5. Install prompt fired
+    const promptOk = !!window._installPromptEvent || window._isStandalone;
+    checks.push({
+      ok: promptOk,
+      label: window._isStandalone ? 'Already installed' :
+        (promptOk ? 'Chrome offered the install prompt ✓' :
+          'Install prompt not fired yet — fix the items above, then reload')
+    });
+
+    rows.innerHTML = checks.map(c =>
+      `<div class="pwa-diag-row"><span class="pwa-diag-dot ${c.ok ? 'ok' : 'bad'}"></span> ${escapeHtml(c.label)}</div>`
+    ).join('');
+  }
+
+  if (recheck) recheck.onclick = run;
+  run();
 }
 
 async function doAndroidInstall() {
