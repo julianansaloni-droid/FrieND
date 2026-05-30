@@ -3838,6 +3838,52 @@
     line-height: 1.45;
     font-family: 'Fraunces', serif;
   }
+  /* ============================== PTO / ON-LEAVE BANNER ============================== */
+  .pto-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    background: linear-gradient(135deg, var(--sage-soft, #e8ede4) 0%, var(--paper-warm) 70%);
+    border: 1px solid var(--rule-soft);
+    border-left: 2px solid var(--moss, #6b8a5e);
+    border-radius: 14px;
+    padding: 12px 14px;
+    margin-bottom: 20px;
+  }
+  .pto-banner-main { display: flex; align-items: flex-start; gap: 10px; }
+  .pto-banner-dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--moss, #6b8a5e);
+    margin-top: 5px; flex-shrink: 0;
+    box-shadow: 0 0 0 4px rgba(107,138,94,0.15);
+  }
+  .pto-banner-title {
+    font-family: 'Fraunces', serif;
+    font-size: 15px; font-weight: 500; color: var(--ink);
+    margin-bottom: 2px;
+  }
+  .pto-days { font-style: italic; font-weight: 400; color: var(--moss-deep, #4f6b45); }
+  .pto-banner-sub {
+    font-family: 'Fraunces', serif; font-style: italic;
+    font-size: 12.5px; color: var(--ink-soft); line-height: 1.4;
+  }
+  .pto-banner-resume {
+    flex-shrink: 0;
+    background: transparent;
+    border: 1px solid var(--rule);
+    border-radius: 99px;
+    color: var(--ink-soft);
+    font-family: 'DM Sans', system-ui, sans-serif;
+    font-size: 12px;
+    padding: 6px 12px;
+    cursor: pointer;
+    transition: all 200ms;
+  }
+  .pto-banner-resume:active { background: var(--paper-lift); transform: scale(0.96); }
+  /* On leave, the Right Now rest card leans calm/sage rather than warm-urgent */
+  .right-now.kind-rest-pto { border-left-color: var(--moss, #6b8a5e); }
+  .right-now.kind-rest-pto .rn-eyebrow { color: var(--moss-deep, #4f6b45); }
 </style>
 </head>
 <body>
@@ -3881,6 +3927,9 @@
       <h1 id="home-greeting">Good morning.</h1>
       <p class="sub" id="home-sub">A soft start. Nothing here is urgent.</p>
     </div>
+
+    <!-- On-leave banner — shows only while PTO mode is active -->
+    <div id="pto-banner" class="pto-banner" style="display:none"></div>
 
     <!-- Right now — the one-thing forward surface. Always shows something,
          never empty. Phase-aware: morning shows a card, day shows the cue,
@@ -5822,6 +5871,9 @@ function renderHome() {
   // Insight — gentle pattern observation, only if signal exists
   renderInsight();
 
+  // On-leave banner
+  renderPtoBanner();
+
   // Companion presence — atmospheric body-double indicator
   renderCompanionPresence();
 
@@ -6308,6 +6360,145 @@ function renderRightNow() {
 /* Phase-aware priority logic. Each phase has its own answer to
    "what's the one thing right now?" — but they share a common
    override layer: arrived cues always win if present. */
+/* ================================================================
+   PTO / TIME-OFF MODE
+   Sets down the work-framing while you're on leave: no "back to the desk",
+   no "work shape is closing", no manufactured task nudges. The restful parts
+   of the app (morning cards, check-in, sensory room) stay. Optional end date
+   auto-resumes normal mode. Opt-in, off by default.
+   ================================================================ */
+function isPtoActive() {
+  if (!state.user || !state.user.pto || !state.user.pto.active) return false;
+  // Auto-resume once the end date has passed
+  if (state.user.pto.until) {
+    if (state.user.pto.until < todayKey()) {
+      state.user.pto.active = false;
+      save(KEYS.user, state.user);
+      logEvent('pto_auto_resumed', { until: state.user.pto.until });
+      return false;
+    }
+  }
+  return true;
+}
+
+/* Start sheet — optional return date; leaving it blank means open-ended. */
+function openPtoStartSheet() {
+  const m = document.createElement('div');
+  m.className = 'modal-backdrop show';
+  m.style.zIndex = '185';
+  const todayStr = todayKey();
+  m.innerHTML = `
+    <div class="modal" style="max-width:420px;">
+      <button class="modal-close" data-close>×</button>
+      <h2>Time off.</h2>
+      <p class="sub" style="margin-bottom:16px;">While you're away, FrieND sets down the work-framing — no "back to the desk", no end-of-work close, no task nudges. Mornings, check-ins and the quiet space stay.</p>
+      <div class="re-field">
+        <label class="re-label">Back on <span class="re-hint">(optional — leave blank for open-ended)</span></label>
+        <input type="date" id="pto-until" class="re-input" min="${todayStr}" />
+      </div>
+      <div style="margin-top:18px;display:flex;gap:8px;justify-content:flex-end;">
+        <button class="pill" data-close>Cancel</button>
+        <button class="pill solid" id="pto-start">Start time off</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(m);
+  m.querySelectorAll('[data-close]').forEach(b => b.onclick = () => m.remove());
+  m.addEventListener('click', (e) => { if (e.target === m) m.remove(); });
+  m.querySelector('#pto-start').onclick = () => {
+    const until = m.querySelector('#pto-until').value || null;
+    if (until && until < todayStr) { showToast('Pick a date in the future, or leave it blank.'); return; }
+    state.user.pto = { active: true, until: until, started: Date.now() };
+    save(KEYS.user, state.user);
+    logEvent('pto_enabled', { until: until || 'open-ended' });
+    m.remove();
+    renderSettings();
+    showToast(until ? 'Time off, until you\'re back.' : 'Time off. No end date — resume whenever.', 4200);
+  };
+}
+
+function ptoDaysLeftLabel() {
+  if (!state.user || !state.user.pto || !state.user.pto.until) return null;
+  const until = new Date(state.user.pto.until + 'T00:00:00');
+  const now = new Date(); now.setHours(0,0,0,0);
+  const days = Math.round((until - now) / 86400000);
+  if (days <= 0) return 'last day';
+  if (days === 1) return 'back tomorrow';
+  return days + ' days left';
+}
+
+/* Restful Right Now offers for time off. Keeps the gentle rituals (morning
+   draw, check-in) but replaces work-leaning prompts with rest. */
+function ptoRightNowOffer(phase) {
+  if (phase === 'first-light' || phase === 'morning') {
+    if (!isMorningDoneToday()) {
+      return {
+        kind: 'morning',
+        eyebrow: 'On leave · a quiet start',
+        title: 'Draw the morning',
+        sub: 'No demand. Just three cards, if you like.',
+        actions: [{ id: 'open-morning', label: 'Open the morning' }]
+      };
+    }
+    return {
+      kind: 'rest-pto',
+      eyebrow: 'On leave',
+      title: 'Nothing is owed today',
+      sub: 'The morning is held. Let it be slow.',
+      actions: [{ id: 'open-sensory', label: 'Step into quiet' }]
+    };
+  }
+  if (phase === 'midday' || phase === 'afternoon') {
+    return {
+      kind: 'rest-pto',
+      eyebrow: phase === 'midday' ? 'On leave · midday' : 'On leave · the afternoon',
+      title: 'The day is yours',
+      sub: 'Nothing is held. Rest counts as the thing.',
+      actions: [
+        { id: 'open-sensory', label: 'Step into quiet' },
+        { id: 'open-focus', label: 'Hold something gently' }
+      ]
+    };
+  }
+  if (phase === 'evening') {
+    if (!isCheckinDoneToday()) {
+      return {
+        kind: 'checkin',
+        eyebrow: 'On leave · the evening',
+        title: 'A small look back',
+        sub: 'How was the day off?',
+        actions: [{ id: 'open-checkin', label: 'Check in' }]
+      };
+    }
+    return {
+      kind: 'rest-pto',
+      eyebrow: 'On leave · the evening',
+      title: 'Let the day close on its own',
+      sub: 'No tomorrow to prepare.',
+      actions: [{ id: 'open-sensory', label: 'Step into quiet' }]
+    };
+  }
+  if (phase === 'night') {
+    if (!isCheckinDoneToday()) {
+      return {
+        kind: 'checkin',
+        eyebrow: 'On leave · before sleep',
+        title: 'Mark the day held',
+        sub: 'A two-tap close',
+        actions: [{ id: 'open-checkin', label: 'Check in' }]
+      };
+    }
+    return {
+      kind: 'close',
+      eyebrow: 'On leave · night',
+      title: 'The day is closed',
+      sub: 'Rest well. There\'s nowhere to be.',
+      actions: [{ id: 'open-sensory', label: 'A quiet space' }]
+    };
+  }
+  return null;
+}
+
 function computeRightNowOffer(phase) {
   // Cues that have arrived — always highest priority, regardless of phase
   const cues = tasksWithArrivedCues();
@@ -6356,6 +6547,12 @@ function computeRightNowOffer(phase) {
   }
 
   // Phase-specific defaults when nothing more urgent is pending
+
+  // On leave: restful prompts instead of work-leaning phase defaults
+  if (isPtoActive()) {
+    const ptoOffer = ptoRightNowOffer(phase);
+    if (ptoOffer) return ptoOffer;
+  }
 
   if (phase === 'first-light') {
     if (!isMorningDoneToday()) {
@@ -8574,6 +8771,13 @@ function renderSettings() {
     </div>
     <div class="settings-row">
       <div>
+        <div class="settings-label">Time off</div>
+        <div class="settings-value">${isPtoActive() ? ('On leave' + (ptoDaysLeftLabel() ? ' · ' + ptoDaysLeftLabel() : '') + ' — work-framing set down') : 'Off · sets down work nudges while you\'re away'}</div>
+      </div>
+      <button class="pill ${isPtoActive() ? '' : 'solid'}" data-action="toggle-pto">${isPtoActive() ? 'End' : 'Start'}</button>
+    </div>
+    <div class="settings-row">
+      <div>
         <div class="settings-label">Routines</div>
         <div class="settings-value">${(state.routines || []).length > 0 ? (state.routines.length + ' set up · small named sequences') : 'Not yet started'}</div>
       </div>
@@ -8997,6 +9201,16 @@ async function settingsAction(action) {
     showToast(state.user.disable_transitions ? 'Transitions off.' : 'Transitions on.');
   } else if (action === 'routines') {
     openRoutinesList();
+  } else if (action === 'toggle-pto') {
+    if (isPtoActive()) {
+      state.user.pto = { active: false, until: null };
+      save(KEYS.user, state.user);
+      logEvent('pto_disabled', { via: 'settings' });
+      renderSettings();
+      showToast('Welcome back. The shape of the day returns.');
+    } else {
+      openPtoStartSheet();
+    }
   } else if (action === 'toggle-companion') {
     state.user.companion_off = !state.user.companion_off;
     save(KEYS.user, state.user);
@@ -11564,6 +11778,34 @@ function markInsightShown(key) {
   save(KEYS.user, state.user);
 }
 
+/* The on-leave banner: gentle, dismissable-by-resuming, shows days left. */
+function renderPtoBanner() {
+  const el = document.getElementById('pto-banner');
+  if (!el) return;
+  if (!isPtoActive()) { el.style.display = 'none'; document.body.classList.remove('pto-active'); return; }
+  document.body.classList.add('pto-active');
+  el.style.display = '';
+  const daysLeft = ptoDaysLeftLabel();
+  el.innerHTML = `
+    <div class="pto-banner-main">
+      <span class="pto-banner-dot"></span>
+      <div>
+        <div class="pto-banner-title">On leave${daysLeft ? ' · <span class="pto-days">' + escapeHtml(daysLeft) + '</span>' : ''}</div>
+        <div class="pto-banner-sub">The work shape is set down. Rest is the thing right now.</div>
+      </div>
+    </div>
+    <button class="pto-banner-resume" data-pto-resume>Back to work</button>
+  `;
+  const resume = el.querySelector('[data-pto-resume]');
+  if (resume) resume.onclick = () => {
+    state.user.pto = { active: false, until: null };
+    save(KEYS.user, state.user);
+    logEvent('pto_disabled', { via: 'banner' });
+    renderHome();
+    showToast('Welcome back. The shape of the day returns.');
+  };
+}
+
 function renderInsight() {
   const el = document.getElementById('insight-card');
   if (!el) return;
@@ -11832,6 +12074,9 @@ function describeEvent(e) {
     case 'insight_dismissed': return { icon: '·', text: 'Held an observation' };
     case 'checkin_notif_enabled': return { icon: '◔', text: 'Turned on the daily check-in reminder' };
     case 'checkin_notif_disabled': return { icon: '·', text: 'Turned off the daily check-in reminder' };
+    case 'pto_enabled': return { icon: '◷', text: 'Started time off' + (d.until && d.until !== 'open-ended' ? ' until ' + d.until : '') };
+    case 'pto_disabled': return { icon: '·', text: 'Ended time off' };
+    case 'pto_auto_resumed': return { icon: '·', text: 'Time off ended — back to the usual shape' };
     case 'task_deleted': return { icon: '·', text: 'Removed task: ' + escapeHtml(d.text || '') };
     case 'voice_capture_started': return { icon: '🎤', text: 'Started voice capture' };
     case 'voice_capture_stopped': return { icon: '🎤', text: 'Captured ' + (d.len || 0) + ' chars by voice' };
@@ -12251,7 +12496,7 @@ function detectPendingTransition() {
     return { kind: 'returning', gapMs };
   }
   // 2) Soft close — between 17:00 and 18:00, once per day
-  if (h >= 17 && h < 18 && state.user.soft_close_seen_date !== today) {
+  if (h >= 17 && h < 18 && state.user.soft_close_seen_date !== today && !isPtoActive()) {
     return { kind: 'soft_close' };
   }
   // 3) Phase boundary — phase changed since last seen
