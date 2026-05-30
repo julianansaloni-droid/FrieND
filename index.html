@@ -4776,8 +4776,129 @@ function notifText(kind, payload) {
 }
 
 /* ================================================================
-   CONTENT: SCAFFOLD SEED (Irish-resident defaults, parameterised)
+   SCHEDULED CHECK-IN REMINDER (opt-in, local, no server)
+   Uses the Notification Triggers API (TimestampTrigger) to schedule a
+   daily check-in nudge that fires even when the app is closed — on Android.
+   Experimental API: we feature-detect and degrade honestly if unsupported.
+
+   Because each trigger is one-shot, we schedule a rolling window of the next
+   several days and top it back up whenever the app opens. Days already
+   checked in are skipped. All copy comes from the existing warm tone library.
    ================================================================ */
+const CHECKIN_TAG_PREFIX = 'friend-checkin-';
+const CHECKIN_WINDOW_DAYS = 7;
+
+function supportsScheduledNotifs() {
+  return ('Notification' in window) &&
+         ('serviceWorker' in navigator) &&
+         ('TimestampTrigger' in window);
+}
+
+function checkinNotifStatusLabel() {
+  if (!state.user) return '';
+  if (state.user.checkin_notif) {
+    const t = state.user.checkin_time || '21:00';
+    return 'On — a gentle nudge around ' + t;
+  }
+  if (!supportsScheduledNotifs()) {
+    return 'Off · may not be supported on this browser';
+  }
+  return 'Off · one quiet reminder at your check-in time';
+}
+
+/* Turn the reminder on: request permission (user-gesture driven), then arm. */
+async function enableCheckinReminder() {
+  if (!supportsScheduledNotifs()) {
+    return { ok: false, reason: 'unsupported' };
+  }
+  let perm = Notification.permission;
+  if (perm === 'default') {
+    try { perm = await Notification.requestPermission(); }
+    catch (e) { return { ok: false, reason: 'error' }; }
+  }
+  if (perm !== 'granted') {
+    return { ok: false, reason: 'denied' };
+  }
+  await scheduleCheckinNotifications();
+  return { ok: true };
+}
+
+/* Arm (or re-arm) the rolling window of daily check-in notifications. */
+async function scheduleCheckinNotifications() {
+  if (!supportsScheduledNotifs()) return;
+  if (Notification.permission !== 'granted') return;
+  if (!state.user || !state.user.checkin_notif) return;
+  let reg;
+  try { reg = await navigator.serviceWorker.getRegistration(); }
+  catch (e) { return; }
+  if (!reg) return;
+
+  await cancelCheckinNotifications();
+
+  const parts = (state.user.checkin_time || '21:00').split(':');
+  const hh = parseInt(parts[0], 10) || 21;
+  const mm = parseInt(parts[1], 10) || 0;
+  const now = new Date();
+  const doneToday = (typeof isCheckinDoneToday === 'function') ? isCheckinDoneToday() : false;
+
+  for (let i = 0; i < CHECKIN_WINDOW_DAYS; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i, hh, mm, 0, 0);
+    // Skip times already past (today, if the hour has gone), with small buffer
+    if (d.getTime() <= now.getTime() + 5000) continue;
+    // Skip today if already checked in
+    if (i === 0 && doneToday) continue;
+    const dateKey = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+    try {
+      await reg.showNotification('FrieND', {
+        tag: CHECKIN_TAG_PREFIX + dateKey,
+        body: notifText('checkin'),
+        icon: 'icon-192.png',
+        badge: 'icon-192.png',
+        silent: false,
+        requireInteraction: false,
+        showTrigger: new TimestampTrigger(d.getTime()),
+        data: { url: location.href.split('#')[0], kind: 'checkin' }
+      });
+    } catch (e) { /* one failure shouldn't abort the rest */ }
+  }
+}
+
+/* Cancel all pending (scheduled-but-not-yet-fired) check-in notifications. */
+async function cancelCheckinNotifications() {
+  try {
+    const reg = await navigator.serviceWorker.getRegistration();
+    if (!reg) return;
+    // includeTriggered surfaces scheduled notifications that haven't fired yet
+    let notes = [];
+    try { notes = await reg.getNotifications({ includeTriggered: true }); }
+    catch (e) { notes = await reg.getNotifications(); }
+    notes.forEach(n => { if (n.tag && n.tag.indexOf(CHECKIN_TAG_PREFIX) === 0) n.close(); });
+  } catch (e) { /* ignore */ }
+}
+
+/* Fire a one-off test notification ~10s out so the user can confirm it works. */
+async function testCheckinNotification() {
+  if (!supportsScheduledNotifs()) { showToast('Scheduled notifications not supported here.'); return; }
+  if (Notification.permission !== 'granted') {
+    const p = await Notification.requestPermission().catch(() => 'denied');
+    if (p !== 'granted') { showToast('Notification permission is off.'); return; }
+  }
+  try {
+    const reg = await navigator.serviceWorker.getRegistration();
+    if (!reg) { showToast('Service worker not ready — reload and retry.'); return; }
+    await reg.showNotification('FrieND', {
+      tag: 'friend-checkin-test',
+      body: notifText('checkin'),
+      icon: 'icon-192.png',
+      badge: 'icon-192.png',
+      showTrigger: new TimestampTrigger(Date.now() + 10000),
+      data: { url: location.href.split('#')[0], kind: 'checkin-test' }
+    });
+    showToast('Test set — arrives in ~10s. You can close the app to check.', 4200);
+  } catch (e) {
+    showToast('Could not schedule the test on this browser.');
+  }
+}
 const SCAFFOLD_TEMPLATES = {
   car_nct: { id: 's-nct', name: "Car NCT", category: "Vehicle", frequency_months: 12, lead_time_weeks: 6, daysOut: 30, gate: 'drives',
     copy: "Cars over four years old require an NCT in Ireland. Booking slots run thin near the deadline — booking now is easier than chasing one in the last week. If the test doesn't pass, the re-test is free within 21 days." },
@@ -8018,6 +8139,10 @@ function finishCheckin() {
     lightPath: state.ci.capacity === 'running-low',
     mode: state.ci.mode || 'full'
   });
+  // If the daily reminder is on, re-arm so today's (now-redundant) nudge is dropped
+  if (state.user && state.user.checkin_notif) {
+    scheduleCheckinNotifications();
+  }
   renderCheckin();
 }
 
@@ -8370,6 +8495,21 @@ function renderSettings() {
     </div>
     <div class="settings-row">
       <div>
+        <div class="settings-label">Daily check-in reminder</div>
+        <div class="settings-value" id="checkin-notif-value">${checkinNotifStatusLabel()}</div>
+      </div>
+      <button class="pill ${state.user && state.user.checkin_notif ? '' : 'solid'}" data-action="toggle-checkin-notif">${state.user && state.user.checkin_notif ? 'Turn off' : 'Turn on'}</button>
+    </div>
+    ${(state.user && state.user.checkin_notif) ? `
+    <div class="settings-row">
+      <div>
+        <div class="settings-label">Test the reminder</div>
+        <div class="settings-value">Fires a sample in about 10 seconds</div>
+      </div>
+      <button class="pill" data-action="test-checkin-notif">Test</button>
+    </div>` : ''}
+    <div class="settings-row">
+      <div>
         <div class="settings-label">Preview a notification</div>
         <div class="settings-value">Sample the tone library</div>
       </div>
@@ -8682,7 +8822,7 @@ async function doAndroidInstall() {
   }
 }
 
-function settingsAction(action) {
+async function settingsAction(action) {
   if (action === 'fullscreen') {
     toggleFullscreen();
   } else if (action === 'rename') {
@@ -8690,7 +8830,7 @@ function settingsAction(action) {
     if (n && n.trim()) { state.user.name = n.trim(); save(KEYS.user, state.user); logEvent('settings_changed', { field: 'name' }); renderSettings(); }
   } else if (action === 'retime') {
     const t = prompt("Evening check-in time (HH:MM, 24-hour):", state.user.checkin_time);
-    if (t && /^\d{2}:\d{2}$/.test(t)) { state.user.checkin_time = t; save(KEYS.user, state.user); logEvent('settings_changed', { field: 'checkin_time' }); renderSettings(); }
+    if (t && /^\d{2}:\d{2}$/.test(t)) { state.user.checkin_time = t; save(KEYS.user, state.user); logEvent('settings_changed', { field: 'checkin_time' }); if (state.user.checkin_notif) { scheduleCheckinNotifications(); } renderSettings(); }
   } else if (action === 'reset-today') {
     delete state.log[todayKey()];
     delete state.morning[todayKey()];
@@ -8760,6 +8900,43 @@ function settingsAction(action) {
     ].filter(Boolean);
     const pick = samples[Math.floor(Math.random() * samples.length)];
     showToast(pick, 3800);
+  } else if (action === 'toggle-checkin-notif') {
+    if (state.user.checkin_notif) {
+      // Turning off
+      state.user.checkin_notif = false;
+      save(KEYS.user, state.user);
+      await cancelCheckinNotifications();
+      logEvent('checkin_notif_disabled', {});
+      renderSettings();
+      showToast('Reminder off. The app stays quiet.');
+    } else {
+      // Turning on — request permission, then arm
+      if (!supportsScheduledNotifs()) {
+        showToast('This browser can\'t schedule reminders. Try Chrome on Android.', 4200);
+        return;
+      }
+      state.user.checkin_notif = true; // optimistic; revert if denied
+      const res = await enableCheckinReminder();
+      if (res.ok) {
+        save(KEYS.user, state.user);
+        logEvent('checkin_notif_enabled', { time: state.user.checkin_time || '21:00' });
+        renderSettings();
+        showToast('Set. A gentle nudge around ' + (state.user.checkin_time || '21:00') + '.', 4000);
+      } else {
+        state.user.checkin_notif = false;
+        save(KEYS.user, state.user);
+        renderSettings();
+        if (res.reason === 'denied') {
+          showToast('Notifications are blocked. Allow them in your browser settings first.', 4600);
+        } else if (res.reason === 'unsupported') {
+          showToast('Scheduled reminders aren\'t supported on this browser.', 4200);
+        } else {
+          showToast('Couldn\'t turn the reminder on.');
+        }
+      }
+    }
+  } else if (action === 'test-checkin-notif') {
+    await testCheckinNotification();
   } else if (action === 'wipe') {
     if (confirm("Erase everything and start fresh? This cannot be undone.")) {
       Object.values(KEYS).forEach(k => localStorage.removeItem(k));
@@ -11539,6 +11716,8 @@ function describeEvent(e) {
     case 'routine_deleted': return { icon: '·', text: 'Removed routine: ' + escapeHtml(d.name || '') };
     case 'insight_surfaced': return { icon: '◌', text: 'A quiet observation surfaced' };
     case 'insight_dismissed': return { icon: '·', text: 'Held an observation' };
+    case 'checkin_notif_enabled': return { icon: '◔', text: 'Turned on the daily check-in reminder' };
+    case 'checkin_notif_disabled': return { icon: '·', text: 'Turned off the daily check-in reminder' };
     case 'task_deleted': return { icon: '·', text: 'Removed task: ' + escapeHtml(d.text || '') };
     case 'voice_capture_started': return { icon: '🎤', text: 'Started voice capture' };
     case 'voice_capture_stopped': return { icon: '🎤', text: 'Captured ' + (d.len || 0) + ' chars by voice' };
@@ -11908,6 +12087,11 @@ function init() {
   }
   // After detection runs, mark this as a seen point so subsequent opens detect gaps
   markSeen();
+  // If the daily check-in reminder is on, top up the rolling notification window.
+  // Deferred so it never blocks first paint; silently no-ops if unsupported/denied.
+  if (state.user && state.user.checkin_notif) {
+    setTimeout(() => { scheduleCheckinNotifications(); }, 1500);
+  }
 }
 
 /* Tier-3 "what's new" tour — surfaces once for existing users (pre-Tier-3)

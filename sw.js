@@ -6,7 +6,7 @@
    All app data lives in localStorage, which the service worker never
    touches — so updating the cache never affects a user's data. */
 
-const CACHE_VERSION = 'friend-v1';
+const CACHE_VERSION = 'friend-v2';
 const APP_SHELL = [
   './',
   './index.html',
@@ -71,6 +71,24 @@ self.addEventListener('fetch', (event) => {
         if (req.mode === 'navigate') return caches.match('./index.html');
         return new Response('', { status: 504, statusText: 'Offline' });
       });
+    })
+  );
+});
+
+/* When a scheduled notification (e.g. the daily check-in) is tapped, focus an
+   already-open FrieND window if there is one, otherwise open the app. The app
+   URL is passed in the notification's data so this works regardless of where
+   the PWA is hosted. */
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const targetUrl = (event.notification.data && event.notification.data.url) || './';
+  event.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then((wins) => {
+      for (const w of wins) {
+        // Focus any existing window belonging to this app
+        if ('focus' in w) return w.focus();
+      }
+      if (clients.openWindow) return clients.openWindow(targetUrl);
     })
   );
 });
