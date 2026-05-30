@@ -6,7 +6,7 @@
    All app data lives in localStorage, which the service worker never
    touches — so updating the cache never affects a user's data. */
 
-const CACHE_VERSION = 'friend-v2';
+const CACHE_VERSION = 'friend-v3';
 const APP_SHELL = [
   './',
   './index.html',
